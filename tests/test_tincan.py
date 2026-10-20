@@ -124,8 +124,9 @@ def test_unanswered_call_is_missed_only_after_it_rings_out():
 
 def test_missed_without_seeing_ring_out_settles_after_timeout():
     # e.g. the caller hangs up early, or a poll missed the ring-out flip
-    _, out = _replay([(5, [_rec("m@h", "missed", 0)]), (60, [_rec("m@h", "missed", 0)]),
-                      (80, [_rec("m@h", "missed", 0)])], prior=OLD)
+    # observed: hanging up while it rings leaves the record untouched at missed/0
+    _, out = _replay([(5, [_rec("m@h", "missed", 0)]), (50, [_rec("m@h", "missed", 0)]),
+                      (56, [_rec("m@h", "missed", 0)])], prior=OLD)
     assert out == [("ringing", False, False), ("ringing", False, False), ("missed", True, True)]
 
 

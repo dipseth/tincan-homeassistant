@@ -124,8 +124,12 @@ on, so a single snapshot can't tell a ringing call from a missed one. Observed w
 | Answered | `missed`, 0 s | `completed`, 0 s while talking | `completed`, *N* s (talk time) |
 | Not answered | `missed`, 0 s | `completed`, 0 s at ~48 s while ringing out | `missed`, 0 s at ~64 s |
 
+If the caller hangs up while it is still ringing, the record never changes at all (`missed`, 0 s).
+
 The integration follows each call across polls: a `missed` record counts as final only after the call has
-been seen at `completed`, or once it is older than 75 s (for example when the caller hangs up early). A call
+been seen at `completed`, or once it is older than 55 s (past the ~48 s ring-out, so the caller must have hung
+up; this is how long an abandoned call keeps reading `ringing`). While a call is ringing or in progress the
+call log is polled every 3 s instead of the configured interval. A call
 can also be logged several times with different call ids but the same start time; those records are merged
 into one call. An unanswered call reads `in_call` for about 15 s while it rings out before settling as missed.
 

@@ -41,6 +41,7 @@ from .const import (
     DOMAIN,
     EVENT_CALL,
     FINAL_PHASES,
+    LIVE_CALL_POLL_INTERVAL,
     MAX_CALL_SECONDS,
     PHASE_CONNECTED,
     PHASE_ENDED,
@@ -498,12 +499,14 @@ class TinCanCallCoordinator(DataUpdateCoordinator[dict[str, CallInfo | None]]):
         account: TinCanCoordinator,
     ) -> None:
         interval = entry.options.get(CONF_CALL_POLL_INTERVAL, DEFAULT_CALL_POLL_INTERVAL)
+        self._idle_interval = timedelta(seconds=interval)
+        self._live_interval = min(self._idle_interval, timedelta(seconds=LIVE_CALL_POLL_INTERVAL))
         super().__init__(
             hass,
             _LOGGER,
             name=f"{DOMAIN} calls",
             config_entry=entry,
-            update_interval=timedelta(seconds=interval),
+            update_interval=self._idle_interval,
         )
         self.client = client
         self.account = account
@@ -541,6 +544,9 @@ class TinCanCallCoordinator(DataUpdateCoordinator[dict[str, CallInfo | None]]):
 
         if lines and failures == len(lines):
             raise UpdateFailed("Call-log poll failed for every line")
+        # poll faster while any line has a call ringing or in progress
+        live = any(call is not None and not call.final for call in calls.values())
+        self.update_interval = self._live_interval if live else self._idle_interval
         return calls
 
     def _fire_event(self, sid: str, call: CallInfo) -> None:
