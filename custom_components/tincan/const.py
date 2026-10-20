@@ -21,5 +21,25 @@ MAX_CALL_POLL_INTERVAL = 120
 MIN_RING_WINDOW = 5
 MAX_RING_WINDOW = 600
 
-# Fired on the HA event bus whenever a new call-log record appears.
+# How long a record may sit at "missed" (ringing) before it is trusted as a
+# final missed call without having seen the ring-out. Observed 2026-10-20: an
+# unanswered call is "missed" while ringing, flips to "completed" at ~48 s when
+# it rings out, then settles back to "missed" at ~64 s.
+RING_TIMEOUT = 75
+# A record still at "completed" with duration 0 after this long is treated as
+# ended (guards against a call that never got its final duration written).
+MAX_CALL_SECONDS = 4 * 3600
+# Call-log records fetched per poll; one call can produce several records
+# (one per call leg) that share a start time and are merged into one call.
+CDR_FETCH_LIMIT = 5
+
+# Call phases (from the kid's phone's point of view)
+PHASE_RINGING = "ringing"  # record exists, nobody has picked up yet
+PHASE_CONNECTED = "in_call"  # answered and in progress (or briefly: ringing out)
+PHASE_ENDED = "ended"  # answered call that has finished
+PHASE_MISSED = "missed"  # rang out / caller gave up / voicemail
+FINAL_PHASES = (PHASE_ENDED, PHASE_MISSED)
+
+# Fired on the HA event bus once per call, when it reaches a final phase
+# (ended or missed) -- never while it is still ringing or in progress.
 EVENT_CALL = f"{DOMAIN}_call"

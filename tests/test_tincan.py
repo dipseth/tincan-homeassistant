@@ -14,7 +14,7 @@ from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import MockConfigEntry, async_fire_time_changed
 
 from custom_components.tincan.const import DOMAIN, EVENT_CALL, CONF_REFRESH_TOKEN
-from custom_components.tincan.coordinator import enrich_call, build_contact_index
+from custom_components.tincan.coordinator import CallTracker, enrich_call, build_contact_index, merge_legs
 
 def _env():
     """Load TC_EMAIL / TC_PASSWORD from ./.env or ~/tincan/.env if present."""
@@ -74,6 +74,94 @@ def test_enrich_matches_by_routing_id_then_number():
     unk = enrich_call({"call_type": "incoming", "from_number": "+15559999999", "start_time": None}, idx)
     assert unk.other_party_name == "+15559999999" and unk.end is None
 
+
+
+# ---- call lifecycle: replays of the record sequences seen in live test calls
+T0 = dt_util.parse_datetime("2026-10-20T18:05:32.000Z")
+
+
+def _rec(call_id, status, duration, start=T0):
+    return {"call_id": call_id, "call_type": "outgoing", "status": status, "duration": duration,
+            "start_time": start.isoformat().replace("+00:00", "Z"), "to_name": "Dad",
+            "to_number": "+15550001111", "other_party_is_tincan": False}
+
+
+def _replay(steps, prior=None):
+    """Feed (seconds_after_T0, records) polls to a tracker -> [(phase, missed, fired), ...]."""
+    tracker, out = CallTracker(), []
+    if prior is not None:  # an older, finished call is newest when tracking starts
+        tracker.update(prior, {}, T0 - timedelta(minutes=5))
+    for secs, records in steps:
+        call, fired = tracker.update(records, {}, T0 + timedelta(seconds=secs))
+        out.append((call.phase, call.missed, fired))
+    return tracker, out
+
+
+OLD = [_rec("old@0.0.0.0", "completed", 13, T0 - timedelta(hours=1))]
+
+
+def test_answered_call_is_never_reported_missed():
+    # observed: missed/0 (ringing) -> completed/0 at +15s (picked up) -> completed/13 at +28s
+    _, out = _replay([(2, [_rec("a@h", "missed", 0)] + OLD),
+                      (10, [_rec("a@h", "missed", 0)] + OLD),
+                      (15, [_rec("a@h", "completed", 0)] + OLD),
+                      (28, [_rec("a@h", "completed", 13)] + OLD),
+                      (36, [_rec("a@h", "completed", 13)] + OLD)], prior=OLD)
+    assert out == [("ringing", False, False), ("ringing", False, False),
+                   ("in_call", False, False), ("ended", False, True), ("ended", False, False)]
+
+
+def test_unanswered_call_is_missed_only_after_it_rings_out():
+    # observed: missed/0 -> completed/0 at +48s (ringing out) -> missed/0 at +64s (final)
+    _, out = _replay([(3, [_rec("m@h", "missed", 0)] + OLD),
+                      (40, [_rec("m@h", "missed", 0)] + OLD),
+                      (48, [_rec("m@h", "completed", 0)] + OLD),
+                      (64, [_rec("m@h", "missed", 0)] + OLD),
+                      (72, [_rec("m@h", "missed", 0)] + OLD)], prior=OLD)
+    assert out == [("ringing", False, False), ("ringing", False, False), ("in_call", False, False),
+                   ("missed", True, True), ("missed", True, False)]
+
+
+def test_missed_without_seeing_ring_out_settles_after_timeout():
+    # e.g. the caller hangs up early, or a poll missed the ring-out flip
+    _, out = _replay([(5, [_rec("m@h", "missed", 0)]), (60, [_rec("m@h", "missed", 0)]),
+                      (80, [_rec("m@h", "missed", 0)])], prior=OLD)
+    assert out == [("ringing", False, False), ("ringing", False, False), ("missed", True, True)]
+
+
+def test_calls_already_over_at_startup_do_not_fire():
+    tracker = CallTracker()
+    call, fired = tracker.update(OLD, {}, T0)
+    assert call.phase == "ended" and not fired
+    # later polls must not mistake it for a call that just ended (no event, end unchanged)
+    again, fired = tracker.update(OLD, {}, T0 + timedelta(seconds=8))
+    assert not fired and again.end == call.end == T0 - timedelta(hours=1) + timedelta(seconds=13)
+    # but a call that is still ringing at startup fires when it settles
+    tracker = CallTracker()
+    assert tracker.update([_rec("r@h", "missed", 0)], {}, T0 + timedelta(seconds=5))[1] is False
+    assert tracker.update([_rec("r@h", "completed", 4)], {}, T0 + timedelta(seconds=30))[1] is True
+
+
+def test_call_legs_merge_into_one_call():
+    # one call logged twice (token + UUID ids, same start second), statuses drifting apart
+    legs = [_rec("gZ1lUVLphm7K9c", "missed", 0), _rec("313aaf13-d477-4f", "completed", 9)]
+    key, merged = merge_legs(legs + OLD)
+    assert key == "2026-10-20T18:05:32" and merged["status"] == "completed" and merged["duration"] == 9
+    assert merged["call_id"] == "313aaf13-d477-4f"  # stable: sorted, not whichever leg sorts first
+    _, out = _replay([(30, legs + OLD), (38, list(reversed(legs)) + OLD)], prior=OLD)
+    assert out == [("ended", False, True), ("ended", False, False)]  # one event, not two
+
+
+def test_end_time_is_when_the_call_was_seen_ending():
+    tracker = CallTracker()
+    tracker.update(OLD, {}, T0)
+    tracker.update([_rec("a@h", "completed", 0)], {}, T0 + timedelta(seconds=15))
+    call, _ = tracker.update([_rec("a@h", "completed", 13)], {}, T0 + timedelta(seconds=28))
+    # duration counts talk time only, so start + duration (T0+13s) would be too early
+    assert call.end == T0 + timedelta(seconds=28)
+    # a call that is still ringing has no end yet
+    ringing, _ = CallTracker().update([_rec("r@h", "missed", 0)], {}, T0 + timedelta(seconds=5))
+    assert ringing.end is None
 
 @pytest.fixture
 def threaded_resolver():

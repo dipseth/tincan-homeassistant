@@ -46,6 +46,10 @@
       "recent_call": { "name": "Recent Call" }
     },
     "sensor": {
+      "call_state": {
+        "name": "Call State",
+        "state": { "idle": "Idle", "ringing": "Ringing", "in_call": "In call" }
+      },
       "phone_number": { "name": "Phone Number" },
       "approved_contacts": { "name": "Approved Contacts" },
       "subscription": { "name": "Subscription" },

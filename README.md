@@ -20,9 +20,10 @@ every Tin Can line on it shows up as a device: online status, Do Not Disturb, wh
 ## Features
 
 - **Caller ID** with the contact's name and avatar, matched against the phone's approved contact book
-- **Recent Call** binary sensor that turns on within seconds of a call and off shortly after it ends,
+- **Call State** sensor (`idle` / `ringing` / `in_call`) that follows a call while it happens
+- **Recent Call** binary sensor that turns on as soon as a call ends or is missed, and off shortly after,
   ready for "flash the lights when Grandma calls" automations
-- **`tincan_call` event** on the Home Assistant event bus for every new call
+- **`tincan_call` event** on the Home Assistant event bus once per call, when it has ended or been missed
 - **Online** and **Do Not Disturb** status, phone number, subscription and provisioning details
 - Multiple lines on one account are supported; each becomes its own device
 - Re-authentication prompt if the password changes; polling intervals adjustable from the UI
@@ -48,8 +49,9 @@ One device per Tin Can line, named after the phone:
 |---|---|---|
 | **Online** | binary sensor (connectivity) | whether the phone is connected to the Tin Can cloud |
 | **Do Not Disturb** | binary sensor | the line's DND setting |
-| **Recent Call** | binary sensor | on for *N* seconds after the newest call ends (default 30); caller picture + call attributes |
-| **Last Call** | sensor | `<who> (<direction>, <status>)`, caller avatar as picture, full call attributes |
+| **Call State** | sensor (enum) | `idle`, `ringing` or `in_call`; caller picture + call attributes while a call is live |
+| **Recent Call** | binary sensor | on for *N* seconds after the newest call ends or is missed (default 30); caller picture + call attributes |
+| **Last Call** | sensor | `<who> (<direction>, <status>)` once over, `<who> (<direction>, ringing / in call)` before; caller avatar as picture, full call attributes |
 | **Last Call Time** | sensor (timestamp) | start of the newest call |
 | **Phone Number** | sensor | the line's number; provider and emergency address as attributes |
 | **Approved Contacts** | sensor | count, with `names` and `speeddials` attributes |
@@ -65,8 +67,9 @@ Last Call, Recent Call and the `tincan_call` event share these attributes:
 | `other_party_name` | contact name if matched, else the name or number the API reported |
 | `other_party_number`, `routing_id` | the other party's number / Tin Can routing id |
 | `direction` | `incoming`, `outgoing` or `unknown`, from the kid's phone's point of view |
-| `status`, `missed`, `duration` | `completed` / `missed` / `voicemail`; `missed` is true for unanswered calls either way |
-| `start_time`, `end_time` | ISO timestamps |
+| `phase` | `ringing`, `in_call`, `ended` or `missed` (see *Call lifecycle* below) |
+| `status`, `missed`, `duration` | raw API status (`completed` / `missed` / `voicemail`); `missed` is true only once an unanswered call is over; `duration` is talk time |
+| `start_time`, `end_time` | ISO timestamps; `end_time` is empty until the call is over |
 | `contact_name`, `contact_id`, `speeddial`, `group_id`, `number_label` | from the matched approved contact |
 | `avatar` | the contact's picture (also used as the entity picture) |
 | `other_party_is_tincan` | whether the other party is another Tin Can |
@@ -108,8 +111,23 @@ Everything is set up from the UI. Under the integration's **Configure** button:
 | Call log poll interval | 8 s | how quickly a new call is noticed |
 | Recent Call window | 30 s | how long Recent Call stays on after a call ends |
 
-The Tin Can cloud has no live "ringing" signal; a call record appears within seconds of a call, so the
-call log poll is what drives Recent Call and the `tincan_call` event.
+The call log poll drives Call State, Recent Call and the `tincan_call` event, so they lag the phone by up to
+one call log poll interval.
+
+### Call lifecycle
+
+The Tin Can cloud writes a call's record the moment the phone starts ringing and rewrites it as the call goes
+on, so a single snapshot can't tell a ringing call from a missed one. Observed with controlled test calls:
+
+| | Ringing | Then | Finally |
+|---|---|---|---|
+| Answered | `missed`, 0 s | `completed`, 0 s while talking | `completed`, *N* s (talk time) |
+| Not answered | `missed`, 0 s | `completed`, 0 s at ~48 s while ringing out | `missed`, 0 s at ~64 s |
+
+The integration follows each call across polls: a `missed` record counts as final only after the call has
+been seen at `completed`, or once it is older than 75 s (for example when the caller hangs up early). A call
+can also be logged several times with different call ids but the same start time; those records are merged
+into one call. An unanswered call reads `in_call` for about 15 s while it rings out before settling as missed.
 
 ## How it works
 
