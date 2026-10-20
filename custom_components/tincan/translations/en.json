@@ -1,0 +1,57 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Tin Can account",
+        "description": "Sign in with the parent account you use in the Tin Can app. Nothing is written to your account; the integration only reads.",
+        "data": {
+          "email": "Email",
+          "password": "Password"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Re-authenticate Tin Can",
+        "description": "The password for {email} was rejected. Enter the current password.",
+        "data": {
+          "password": "Password"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Tin Can rejected the email or password.",
+      "cannot_connect": "Could not reach the Tin Can cloud.",
+      "unknown": "Unexpected error; check the Home Assistant log."
+    },
+    "abort": {
+      "already_configured": "This Tin Can account is already set up.",
+      "reauth_successful": "Re-authentication was successful."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Tin Can polling",
+        "data": {
+          "poll_interval": "Account poll interval (presence, contacts, subscription)",
+          "call_poll_interval": "Call log poll interval (Recent Call latency)",
+          "ring_window": "Recent Call stays on for this long after a call ends"
+        }
+      }
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "online": { "name": "Online" },
+      "do_not_disturb": { "name": "Do Not Disturb" },
+      "recent_call": { "name": "Recent Call" }
+    },
+    "sensor": {
+      "phone_number": { "name": "Phone Number" },
+      "approved_contacts": { "name": "Approved Contacts" },
+      "subscription": { "name": "Subscription" },
+      "provisioning": { "name": "Provisioning" },
+      "last_call": { "name": "Last Call" },
+      "last_call_time": { "name": "Last Call Time" }
+    }
+  }
+}

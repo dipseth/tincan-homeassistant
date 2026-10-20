@@ -1,0 +1,13 @@
+{
+  "domain": "tincan",
+  "name": "Tin Can",
+  "codeowners": ["@dipseth"],
+  "config_flow": true,
+  "dependencies": [],
+  "documentation": "https://github.com/dipseth/tincan-homeassistant",
+  "integration_type": "hub",
+  "iot_class": "cloud_polling",
+  "issue_tracker": "https://github.com/dipseth/tincan-homeassistant/issues",
+  "requirements": [],
+  "version": "1.0.0"
+}
