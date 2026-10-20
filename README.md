@@ -1,4 +1,17 @@
+<p align="center">
+  <img src="custom_components/tincan/brand/icon@2x.png" alt="Tin Can icon" width="128" height="128">
+</p>
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="custom_components/tincan/brand/dark_logo@2x.png">
+    <img src="custom_components/tincan/brand/logo@2x.png" alt="Tin Can" width="320">
+  </picture>
+</p>
+
 # Tin Can for Home Assistant
+
+[![Release](https://img.shields.io/github/v/release/dipseth/tincan-homeassistant)](https://github.com/dipseth/tincan-homeassistant/releases)
+[![HACS Custom](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://hacs.xyz/docs/faq/custom_repositories/)
 
 A native Home Assistant integration for the [Tin Can](https://tincan.kids) kids phone. It polls the Tin Can
 cloud with your parent login and exposes the phone as a device with sensors. No MQTT, no bridge process,
@@ -61,9 +74,12 @@ The old `tc2mqtt.py` bridge produced a device with the **same name and the same 
 ### Icon in Home Assistant
 
 The Tin Can icon and logo ship inside the integration (`custom_components/tincan/brand/`, supported since
-Home Assistant 2026.3), taken from the official app artwork: the yellow smiley as the icon, the black wordmark
-for light theme and the yellow one for dark theme. Entity pictures (caller avatars, the kid's avatar) come
-straight from the API.
+Home Assistant 2026.3), taken from the official app artwork. Home Assistant picks the light or dark variant to
+match the theme. Entity pictures (caller avatars, the kid's avatar) come straight from the API.
+
+| `icon.png` | `logo.png` (light) | `dark_logo.png` (dark) |
+|:--:|:--:|:--:|
+| <img src="custom_components/tincan/brand/icon.png" width="96" alt="icon"> | <img src="custom_components/tincan/brand/logo.png" height="48" alt="logo"> | <img src="custom_components/tincan/brand/dark_logo.png" height="48" alt="dark logo" style="background:#222"> |
 
 ### HACS
 
