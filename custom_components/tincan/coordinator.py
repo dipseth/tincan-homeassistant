@@ -2,7 +2,17 @@
 
 Two coordinators per account:
   * TinCanCoordinator      slow poll: subscriptions, devices, contacts, presence
-  * TinCanCallCoordinator  fast poll: latest call record per line (near-live ring)
+  * TinCanCallCoordinator  fast poll: latest call per line (near-live ring)
+
+Call lifecycle (observed with controlled test calls, 2026-10-20). The cloud
+writes the call record the moment the phone starts ringing and rewrites it as
+the call progresses, so no single snapshot says whether a call was missed:
+
+    answered:    missed/0s (ringing) -> completed/0s (talking) -> completed/Ns
+    unanswered:  missed/0s (ringing) -> completed/0s (ringing out, ~48 s)
+                 -> missed/0s (final, ~64 s)
+
+CallTracker follows each call across polls to tell these apart.
 """
 
 from __future__ import annotations
@@ -27,8 +37,17 @@ from .const import (
     DEFAULT_CALL_POLL_INTERVAL,
     DEFAULT_POLL_INTERVAL,
     DEFAULT_RING_WINDOW,
+    CDR_FETCH_LIMIT,
     DOMAIN,
     EVENT_CALL,
+    FINAL_PHASES,
+    LIVE_CALL_POLL_INTERVAL,
+    MAX_CALL_SECONDS,
+    PHASE_CONNECTED,
+    PHASE_ENDED,
+    PHASE_MISSED,
+    PHASE_RINGING,
+    RING_TIMEOUT,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -88,6 +107,13 @@ class CallInfo:
     contact: dict[str, Any]
     start: datetime | None
     end: datetime | None
+    phase: str = PHASE_ENDED
+    key: str | None = None
+
+    @property
+    def final(self) -> bool:
+        """True once the call has ended or been missed (it will not change again)."""
+        return self.phase in FINAL_PHASES
 
     @property
     def call_id(self) -> str | None:
@@ -132,7 +158,8 @@ class CallInfo:
 
     @property
     def missed(self) -> bool:
-        return self.status in ("missed", "voicemail") or self.api_call_type == "missed"
+        """Only true once the call is over: a ringing call is also logged "missed"."""
+        return self.phase == PHASE_MISSED
 
     @property
     def status(self) -> str:
@@ -140,6 +167,9 @@ class CallInfo:
 
     @property
     def summary(self) -> str:
+        if not self.final:
+            label = "ringing" if self.phase == PHASE_RINGING else "in call"
+            return f"{self.other_party_name} ({self.direction}, {label})"
         return f"{self.other_party_name} ({self.direction}, {self.status})"
 
     def attributes(self) -> dict[str, Any]:
@@ -149,6 +179,7 @@ class CallInfo:
             "direction": self.direction,
             "api_call_type": self.api_call_type,
             "direction_source": "call_id" if self.via_carrier else "call_type",
+            "phase": self.phase,
             "missed": self.missed,
             "status": self.status,
             "duration": rec.get("duration"),
@@ -168,7 +199,79 @@ class CallInfo:
         }
 
 
-def enrich_call(record: dict[str, Any], contact_index: dict[str, dict[str, Any]]) -> CallInfo:
+def call_phase(
+    record: dict[str, Any],
+    start: datetime | None,
+    now: datetime,
+    saw_connected: bool = False,
+) -> str:
+    """Where a call is in its lifecycle, given the record and what we saw before.
+
+    `saw_connected` means an earlier poll saw this call at "completed": after
+    that, "missed" is the final verdict rather than the initial ringing state.
+    Without that history, a "missed" record only counts as final once it is
+    older than RING_TIMEOUT.
+    """
+    status = str(record.get("status") or "")
+    try:
+        duration = int(record.get("duration") or 0)
+    except (TypeError, ValueError):
+        duration = 0
+    age = (now - start).total_seconds() if start is not None else None
+
+    if status == "completed":
+        if duration > 0 or (age is not None and age > MAX_CALL_SECONDS):
+            return PHASE_ENDED
+        return PHASE_CONNECTED
+    if status in ("missed", "voicemail") or record.get("call_type") == "missed":
+        if saw_connected or age is None or age >= RING_TIMEOUT:
+            return PHASE_MISSED
+        return PHASE_RINGING
+    if duration > 0 or age is None or age >= RING_TIMEOUT:
+        return PHASE_ENDED
+    return PHASE_RINGING
+
+
+def merge_legs(records: list[dict[str, Any]]) -> tuple[str, dict[str, Any]] | None:
+    """Collapse the newest call's records (one per call leg) into one record.
+
+    A single call can be logged several times with different call_ids but the
+    same start second. Keyed on that start time, the merged record takes the
+    most-progressed status and longest duration, and a stable call_id (the
+    carrier/SIP one if present, since direction detection relies on it).
+    """
+    if not records:
+        return None
+    key = str(records[0].get("start_time") or "")[:19]
+    legs = [r for r in records if str(r.get("start_time") or "")[:19] == key]
+
+    def _duration(rec: dict[str, Any]) -> int:
+        try:
+            return int(rec.get("duration") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def _progress(rec: dict[str, Any]) -> tuple:
+        cid = str(rec.get("call_id") or "")
+        return (rec.get("status") == "completed", _duration(rec), "@" in cid, cid)
+
+    merged = dict(max(legs, key=_progress))
+    ids = sorted(str(r.get("call_id")) for r in legs if r.get("call_id"))
+    carrier = [cid for cid in ids if "@" in cid]
+    if ids:
+        merged["call_id"] = carrier[0] if carrier else ids[0]
+    merged["duration"] = max(_duration(r) for r in legs)
+    if any(r.get("status") == "completed" for r in legs):
+        merged["status"] = "completed"
+    return key, merged
+
+
+def enrich_call(
+    record: dict[str, Any],
+    contact_index: dict[str, dict[str, Any]],
+    now: datetime | None = None,
+    saw_connected: bool = False,
+) -> CallInfo:
     """Resolve the other party of a call record against the contact book.
 
     The other party is whichever side the record fills in (the kid's own line is
@@ -191,8 +294,9 @@ def enrich_call(record: dict[str, Any], contact_index: dict[str, dict[str, Any]]
         match = contact_index.get(digits(number), {})
 
     start = parse_time(record.get("start_time"))
+    phase = call_phase(record, start, now or dt_util.utcnow(), saw_connected)
     end = None
-    if start is not None:
+    if start is not None and phase in FINAL_PHASES:
         try:
             end = start + timedelta(seconds=int(record.get("duration") or 0))
         except (TypeError, ValueError):
@@ -207,7 +311,58 @@ def enrich_call(record: dict[str, Any], contact_index: dict[str, dict[str, Any]]
         contact=match,
         start=start,
         end=end,
+        phase=phase,
     )
+
+
+class CallTracker:
+    """Follows one line's newest call across polls.
+
+    Remembers whether the call has been seen at "completed" (so a later
+    "missed" is final, not ringing), records when it was first seen final
+    (the real end time: the API's duration only counts talk time), and says
+    when to fire the tincan_call event: once per call, when it turns final,
+    and never for a call that was already over when tracking started.
+    """
+
+    def __init__(self) -> None:
+        self._primed = False
+        self._connected: set[str] = set()
+        self._ended_at: dict[str, datetime] = {}
+        self._fired_key: str | None = None
+
+    def update(
+        self,
+        records: list[dict[str, Any]],
+        contact_index: dict[str, dict[str, Any]],
+        now: datetime,
+    ) -> tuple[CallInfo | None, bool]:
+        """Return (newest call, whether to fire the event for it now)."""
+        merged = merge_legs(records)
+        if merged is None:
+            self._primed = True
+            return None, False
+        key, record = merged
+        if record.get("status") == "completed":
+            self._connected.add(key)
+        call = enrich_call(record, contact_index, now, key in self._connected)
+        call.key = key
+
+        fire = False
+        if call.final:
+            if key not in self._ended_at:
+                # watched it end live; a call already over at startup keeps
+                # the API-derived end (start + duration) instead
+                self._ended_at[key] = now if self._primed else call.end
+            call.end = self._ended_at[key]
+            fire = self._primed and key != self._fired_key
+            self._fired_key = key
+        self._primed = True
+
+        # only the newest call matters; forget older ones
+        self._connected &= {key}
+        self._ended_at = {k: v for k, v in self._ended_at.items() if k == key}
+        return call, fire
 
 
 # --------------------------------------------------------------------- data
@@ -344,19 +499,21 @@ class TinCanCallCoordinator(DataUpdateCoordinator[dict[str, CallInfo | None]]):
         account: TinCanCoordinator,
     ) -> None:
         interval = entry.options.get(CONF_CALL_POLL_INTERVAL, DEFAULT_CALL_POLL_INTERVAL)
+        self._idle_interval = timedelta(seconds=interval)
+        self._live_interval = min(self._idle_interval, timedelta(seconds=LIVE_CALL_POLL_INTERVAL))
         super().__init__(
             hass,
             _LOGGER,
             name=f"{DOMAIN} calls",
             config_entry=entry,
-            update_interval=timedelta(seconds=interval),
+            update_interval=self._idle_interval,
         )
         self.client = client
         self.account = account
         self.ring_window = timedelta(
             seconds=entry.options.get(CONF_RING_WINDOW, DEFAULT_RING_WINDOW)
         )
-        self._seen: dict[str, str | None] = {}
+        self._trackers: dict[str, CallTracker] = {}
 
     def _line(self, sid: str) -> TinCanLine | None:
         return (self.account.data or {}).get(sid)
@@ -365,8 +522,10 @@ class TinCanCallCoordinator(DataUpdateCoordinator[dict[str, CallInfo | None]]):
         lines = self.account.data or {}
         previous = self.data or {}
         results = await asyncio.gather(
-            *(self.client.async_cdrs(sid, limit=1) for sid in lines), return_exceptions=True
+            *(self.client.async_cdrs(sid, limit=CDR_FETCH_LIMIT) for sid in lines),
+            return_exceptions=True,
         )
+        now = dt_util.utcnow()
 
         calls: dict[str, CallInfo | None] = {}
         failures = 0
@@ -378,24 +537,20 @@ class TinCanCallCoordinator(DataUpdateCoordinator[dict[str, CallInfo | None]]):
                 _LOGGER.debug("Call-log poll failed for %s: %s", sid, result)
                 calls[sid] = previous.get(sid)
                 continue
-            record = result[0] if result else None
-            calls[sid] = (
-                enrich_call(record, lines[sid].contact_index) if record else None
-            )
-            self._maybe_fire_event(sid, calls[sid])
+            tracker = self._trackers.setdefault(sid, CallTracker())
+            calls[sid], fire = tracker.update(result, lines[sid].contact_index, now)
+            if fire and calls[sid] is not None:
+                self._fire_event(sid, calls[sid])
 
         if lines and failures == len(lines):
             raise UpdateFailed("Call-log poll failed for every line")
+        # poll faster while any line has a call ringing or in progress
+        live = any(call is not None and not call.final for call in calls.values())
+        self.update_interval = self._live_interval if live else self._idle_interval
         return calls
 
-    def _maybe_fire_event(self, sid: str, call: CallInfo | None) -> None:
-        """Fire tincan_call once per new call record (not on the first poll)."""
-        call_id = call.call_id if call else None
-        first_poll = sid not in self._seen
-        changed = self._seen.get(sid) != call_id
-        self._seen[sid] = call_id
-        if first_poll or not changed or call is None:
-            return
+    def _fire_event(self, sid: str, call: CallInfo) -> None:
+        """Fire tincan_call for a call that has just ended or been missed."""
         line = self._line(sid)
         self.hass.bus.async_fire(
             EVENT_CALL,

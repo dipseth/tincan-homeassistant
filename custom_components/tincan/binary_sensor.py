@@ -77,10 +77,10 @@ class TinCanDndSensor(TinCanEntity, BinarySensorEntity):
 
 
 class TinCanRecentCallSensor(TinCanCallEntity, BinarySensorEntity):
-    """On for `ring_window` seconds after the newest call ends.
+    """On for `ring_window` seconds after the newest call ends or is missed.
 
-    There is no live "ringing" signal in the API; a call record appears within
-    seconds of a call, so this is the closest near-live indicator.
+    Stays off while a call is still ringing or in progress (see Call State),
+    so it never reports a ringing call as missed.
     """
 
     _attr_icon = "mdi:phone-ring"

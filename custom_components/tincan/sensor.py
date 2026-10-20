@@ -1,4 +1,4 @@
-"""Sensors: Last Call, Last Call Time, Phone Number, Approved Contacts, Subscription, Provisioning."""
+"""Sensors: Call State, Last Call, Last Call Time, Phone Number, Approved Contacts, Subscription, Provisioning."""
 
 from __future__ import annotations
 
@@ -11,7 +11,10 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import TinCanConfigEntry
+from .const import PHASE_CONNECTED, PHASE_RINGING
 from .entity import TinCanCallEntity, TinCanEntity
+
+CALL_STATE_IDLE = "idle"
 
 SUBSCRIPTION_ATTRS = (
     "subscription_id", "type", "provider", "stripe_subscription_id", "phone_number",
@@ -43,6 +46,7 @@ async def async_setup_entry(
                 TinCanContactsSensor(data.account, sid),
                 TinCanSubscriptionSensor(data.account, sid),
                 TinCanProvisioningSensor(data.account, sid),
+                TinCanCallStateSensor(data.calls, sid),
                 TinCanLastCallSensor(data.calls, sid),
                 TinCanLastCallTimeSensor(data.calls, sid),
             ]
@@ -145,6 +149,43 @@ class TinCanProvisioningSensor(TinCanEntity, SensorEntity):
     def extra_state_attributes(self) -> dict[str, Any]:
         device = (self.line.device if self.line else None) or {}
         return {k: device.get(k) for k in DEVICE_ATTRS}
+
+
+class TinCanCallStateSensor(TinCanCallEntity, SensorEntity):
+    """idle / ringing / in_call, from the newest call's lifecycle phase.
+
+    Lags the phone by up to one call poll. An unanswered call also reads
+    in_call for ~15 s while it rings out, before it settles as missed.
+    """
+
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = [CALL_STATE_IDLE, PHASE_RINGING, PHASE_CONNECTED]
+
+    def __init__(self, coordinator, subscription_id: str) -> None:
+        super().__init__(coordinator, subscription_id, "call_state")
+
+    @property
+    def native_value(self) -> str:
+        if self.call is None or self.call.final:
+            return CALL_STATE_IDLE
+        return self.call.phase
+
+    @property
+    def icon(self) -> str:
+        return {
+            PHASE_RINGING: "mdi:phone-ring",
+            PHASE_CONNECTED: "mdi:phone-in-talk",
+        }.get(self.native_value, "mdi:phone-hangup")
+
+    @property
+    def entity_picture(self) -> str | None:
+        return self.call.avatar if self.call and not self.call.final else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        if self.call is None or self.call.final:
+            return {}
+        return self.call.attributes()
 
 
 class TinCanLastCallSensor(TinCanCallEntity, SensorEntity):
